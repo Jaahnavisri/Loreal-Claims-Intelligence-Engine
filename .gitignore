@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+*.db
+*.db-journal
+backend/data/
+coverage/
+.DS_Store
+*.tsbuildinfo
+
