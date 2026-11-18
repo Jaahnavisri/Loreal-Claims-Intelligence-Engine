@@ -1,41 +1,119 @@
 # L'Oréal Claims Intelligence Engine
 
-A small full-stack technical proposal demonstrating claim assessment with a study summary, an LLM, and persistent assessment history.
+A full-stack prototype for assessing cosmetic product claims against study evidence. It models the handoff from scientist submission to evaluator review and retains the evidence and each assessment version for traceability.
 
-**Step 1 implementation:** NestJS API, React/Vite interface, and a local SQLite database. The Prisma schema documents the data model; the runtime uses Node's built-in SQLite module so it runs natively on Windows ARM64 devices such as Snapdragon X PCs without a Prisma native engine.
+## What is implemented
 
-## Business process represented
+- Structured claim audience and clinical study metadata.
+- LLM assessment with `SUPPORTIVE`, `NOT_SUPPORTIVE`, or `INCONCLUSIVE` status, reasoning, model-reported confidence, evidence gaps, limitations, and recommendation.
+- Immutable, versioned assessments. A later study submission appends a record and does not overwrite earlier wording, evidence, or result.
+- Deterministic audience-age and study-version comparisons. Missing information is explicitly reported as missing, never treated as a match.
+- Human evaluator decisions (`ACCEPTED`, `REJECTED`, `MORE_EVIDENCE_REQUIRED`) with a required reason for rejection or additional evidence requests.
+- Append-only activity events for claim creation, assessments, and reviewer submissions.
+- React UI for submission, assessment history, comparisons, reviewer decisions, and activity timeline.
 
-Business proposes a product and claims; claim managers screen applicability and feasibility; an R&I scientist submits a formula and study evidence; an evaluator reviews the evidence against each claim. This prototype implements the evaluator handoff: a submitted claim and study summary are assessed, stored, and returned to the UI.
+The model is advisory. A confidence score is model-reported and must not be read as clinical probability. No model result or evaluator acceptance in this prototype authorizes product launch or constitutes regulatory approval.
 
-## Technical shape
+## Architecture
 
 ```text
-React UI  ->  NestJS POST /api/claims/assess  ->  Groq API (free-tier default)
-                         |                            |
-                         +------ Node SQLite <--------+
+React / Vite
+    │ HTTP JSON
+    ▼
+NestJS controllers → ClaimsService → Groq (default) or OpenAI
+                           │
+                           ▼
+                   Node built-in SQLite
 ```
 
-The API persists the claim first, calls the model for a constrained JSON assessment, then saves the assessment linked to the claim. If the model call fails, the claim remains recorded and the API returns an error; retry handling and idempotency are future work. The result is decision support for a human evaluator, not an automated clinical or regulatory approval. The runtime database creates `backend/data/claims.db` on first startup.
+The API uses Node's `node:sqlite` runtime rather than Prisma Client. This avoids Prisma's native database engine on Windows ARM64 Snapdragon devices. `backend/prisma/schema.prisma` documents the same logical model for future tooling; the runtime database is created at `backend/data/claims.db` and upgraded with non-destructive, versioned SQL migrations.
 
-## Research and design notes
+The service stores the claim before requesting an LLM result so that provider failures do not discard the submission. A failed model call does not create a fake assessment. To retry after a failure, send the saved `claimId`; the API adds the next assessment version to that claim.
 
-- NestJS controllers handle HTTP and delegate application logic to injectable providers, which keeps request handling separate from assessment/persistence.
-- The Prisma schema models claims and assessments as a one-to-many relation so a claim can retain review history as evidence or model versions change. Its SQLite table shape is mirrored by the built-in Node SQLite runtime.
-- Node's built-in `node:sqlite` avoids downloading a platform-specific native engine, which is important on Windows ARM64.
-- By default, the backend sends a JSON Schema constrained chat request to Groq using the open-weight `openai/gpt-oss-20b` model. The existing OpenAI Responses API path remains available by setting `LLM_PROVIDER=openai`. The server validates ranges and required fields before persistence; model output is not trusted as free-form authority.
-- Groq's free tier has provider-defined rate limits; it is useful for local evaluation but not a production availability guarantee.
-- The evidence input is an evaluator-provided summary, not a document ingestion pipeline. A production design would preserve source documents, endpoint definitions, population, protocol, and provenance.
+## API
 
-References: [NestJS controllers](https://docs.nestjs.com/controllers), [NestJS providers](https://docs.nestjs.com/providers), [Groq OpenAI compatibility](https://console.groq.com/docs/openai), [Groq structured outputs](https://console.groq.com/docs/structured-outputs), [Groq rate limits](https://console.groq.com/docs/rate-limits).
+All endpoints use the `/api` prefix.
 
-## Roadmap with ample time
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/api/claims/assess` | Create a claim or append a study assessment |
+| `GET` | `/api/claims/:claimId/assessments` | List a claim's assessment history |
+| `GET` | `/api/claims/:claimId/assessments/compare?previousId=…&currentId=…` | Compare two study metadata snapshots |
+| `GET` | `/api/claims/:claimId/audit-history` | Get claim and assessment activity |
+| `GET` | `/api/assessments/:assessmentId` | Get one assessment and its study snapshot |
+| `GET` | `/api/assessments/:assessmentId/reviews` | List evaluator decisions |
+| `POST` | `/api/assessments/:assessmentId/reviews` | Append an evaluator decision |
 
-1. Add workflow states and roles for business, claim managers, scientists, and evaluators; require human sign-off and audit trails at each transition.
-2. Ingest study protocols and reports with secure document storage, provenance, extraction review, and traceable citations to source passages.
-3. Introduce a structured evidence ontology for claim type, endpoint, population, comparator, effect size, duration, and statistical uncertainty.
-4. Evaluate model quality on expert-labeled cases; version prompts/models; monitor calibration, disagreement, drift, and failure rates.
-5. Add access control, tenant isolation, retention controls, encryption, rate limits, redaction, and governance for sensitive study data.
-6. Scale persistence to managed PostgreSQL, move long-running assessments to jobs, and add observability, retries, idempotency, and reviewer queues.
-7. Support multilingual claims and evidence while preserving original text and source-linked translations.
+Example assessment request:
 
+```json
+{
+  "claimText": "Reduces wrinkles by 20% in 4 weeks",
+  "productName": "Revitalift Clinical Serum",
+  "targetAudience": { "minAge": 40, "maxAge": 65, "description": "Adults with visible facial wrinkles" },
+  "evidence": "Study summary with outcome and limitations...",
+  "studyMetadata": {
+    "minParticipantAge": 40,
+    "maxParticipantAge": 65,
+    "sampleSize": 120,
+    "duration": "4 weeks",
+    "studyType": "Randomized, double-blind, vehicle-controlled",
+    "outcomeMeasure": "Wrinkle area reduction",
+    "measurementMethod": "3D imaging"
+  }
+}
+```
+
+The response contains `claim`, `assessment`, `audienceFindings`, and `previousStudyComparison`. To add another study to the same claim, submit the same claim text, product, and audience with the returned `claim.id` as `claimId`, plus the new evidence and metadata. Core claim details are fixed after initial submission; start a new claim to change them.
+
+Example evaluator review:
+
+```json
+{
+  "reviewerName": "Evaluator name",
+  "decision": "MORE_EVIDENCE_REQUIRED",
+  "comments": "Please provide the full protocol and endpoint analysis."
+}
+```
+
+## Local setup
+
+Install dependencies from each application folder. On Windows PowerShell, use `npm.cmd` if script execution policy prevents `npm.ps1` from running.
+
+```powershell
+cd backend
+npm.cmd install
+Copy-Item .env.example .env
+# Add a GROQ_API_KEY in backend/.env
+npm.cmd run start:dev
+```
+
+In another terminal:
+
+```powershell
+cd frontend
+npm.cmd install
+npm.cmd run dev
+```
+
+Open the local Vite URL shown in the frontend terminal. Node.js 24 is expected for the built-in SQLite module. The frontend uses a WebAssembly Rollup package to avoid a blocked native ARM64 Rollup addon on managed Windows devices.
+
+By default the backend uses Groq. Set `LLM_PROVIDER=openai` and `OPENAI_API_KEY` only if using OpenAI. Do not commit `.env` or API keys.
+
+## Design decisions and boundaries
+
+- The evidence comparison service compares structured fields only. It does not infer clinical equivalence or decide that a broader participant age range strengthens a claim.
+- Audience age is compared against study participant age. Free-text audience descriptions are surfaced as not deterministically comparable.
+- The LLM receives the supplied claim, audience, metadata, and evidence summary as data. Its response is schema constrained and validated before persistence.
+- Assessments and human reviews are separate records. A review does not rewrite the AI result.
+- Authentication, role permissions, document uploads, source citations, managed production database, model-quality evaluation, and secure deployment are future work. This prototype should not be used for real regulatory decisions.
+
+## Suggested roadmap
+
+1. Add authentication and role-based access for business, claim managers, scientists, and evaluators.
+2. Support controlled evidence uploads, source provenance, extraction review, and citations to exact report passages.
+3. Expand structured claim ontology: endpoint, comparator, effect size, statistical uncertainty, protocol, and population criteria.
+4. Build expert-labeled evaluation sets; version prompts/models; assess calibration, disagreement, and drift.
+5. Add privacy, retention, encryption, rate limits, redaction, and governance controls.
+6. Move to managed relational storage and asynchronous jobs with idempotency and reviewer queues.
+7. Add multilingual evidence workflows while preserving originals and reviewed translations.

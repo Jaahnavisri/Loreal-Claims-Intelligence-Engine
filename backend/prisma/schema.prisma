@@ -7,26 +7,90 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum AssessmentStatus {
+  SUPPORTIVE
+  NOT_SUPPORTIVE
+  INCONCLUSIVE
+}
+
+enum ReviewDecision {
+  ACCEPTED
+  REJECTED
+  MORE_EVIDENCE_REQUIRED
+}
+
 model Claim {
-  id          String       @id @default(cuid())
-  productName String?
-  claimText   String
-  createdAt   DateTime     @default(now())
-  assessments Assessment[]
+  id                       String       @id @default(uuid())
+  productName              String?
+  claimText                String
+  targetAudienceMinAge     Int?
+  targetAudienceMaxAge     Int?
+  targetAudienceDescription String?
+  createdAt                DateTime     @default(now())
+  assessments              Assessment[]
 }
 
 model Assessment {
-  id             String   @id @default(cuid())
-  claimId        String
-  evidence       String
-  justified      Boolean
-  confidenceScore Float
-  reasoning      String
-  limitations    String
-  model          String
-  createdAt      DateTime @default(now())
-  claim          Claim    @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  id               String           @id @default(uuid())
+  claimId          String
+  studyVersion     String           @default("Study 1")
+  evidence         String
+  justified        Boolean          @default(false)
+  assessmentStatus AssessmentStatus @default(INCONCLUSIVE)
+  confidenceScore  Float
+  reasoning        String
+  evidenceGaps     String           @default("[]")
+  limitations      String           @default("[]")
+  reviewRequired   Boolean          @default(true)
+  recommendation   String           @default("")
+  model            String
+  createdAt        DateTime         @default(now())
+  claim            Claim            @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  studyMetadata    StudyMetadata?
+  reviews          HumanReview[]
 
   @@index([claimId, createdAt])
 }
 
+model StudyMetadata {
+  assessmentId       String     @id
+  minParticipantAge  Int?
+  maxParticipantAge  Int?
+  sampleSize         Int?
+  location           String?
+  duration           String?
+  studyType          String?
+  studyConditions    String?
+  outcomeMeasure     String?
+  resultSummary      String?
+  genderDistribution String?
+  skinType           String?
+  season             String?
+  measurementMethod  String?
+  assessment         Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+}
+
+model HumanReview {
+  id           String         @id @default(uuid())
+  assessmentId String
+  reviewerName String
+  decision     ReviewDecision
+  comments     String?
+  createdAt    DateTime       @default(now())
+  assessment   Assessment     @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+
+  @@index([assessmentId, createdAt])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String?
+  actorName  String?
+  entityType String
+  entityId   String
+  action     String
+  details    String
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId, createdAt])
+}
